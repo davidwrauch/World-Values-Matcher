@@ -1,0 +1,490 @@
+<!DOCTYPE html>
+<!--
+World Values Survey Country Matcher — Simple Frontend
+
+This file provides a lightweight browser interface for the API built in R using
+Plumber. The main focus of the project is the data pipeline, modeling, and API design,
+so the frontend is intentionally simple and minimal.
+
+What this page does:
+1. Loads the 15 selected survey questions from the API
+2. Collects user responses in the browser
+3. Sends answers to the scoring endpoint
+4. Displays the closest country matches and interpretation
+5. Optionally generates an explanation using Claude through the backend
+
+Architecture:
+
+User Browser
+   ↓
+index.html (this file)
+   ↓
+API endpoints (Plumber in R)
+   ↓
+country similarity scoring + interpretation
+
+The deployed API lives at:
+https://world-values.fly.dev
+
+No API keys are stored in this file. LLM requests are handled server-side.
+-->
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>World Values Country Matcher</title>
+  <style>
+    :root {
+      --bg: #f6f7fb;
+      --card: rgba(255,255,255,0.82);
+      --text: #1f2937;
+      --muted: #6b7280;
+      --border: rgba(148,163,184,0.28);
+      --accent: #4f46e5;
+      --accent-2: #7c3aed;
+      --shadow: 0 18px 50px rgba(79, 70, 229, 0.10);
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      font-family: Inter, Arial, sans-serif;
+      max-width: 860px;
+      margin: 0 auto;
+      padding: 36px 16px 60px;
+      line-height: 1.5;
+      color: var(--text);
+      background:
+        radial-gradient(circle at top left, rgba(124,58,237,0.10), transparent 34%),
+        radial-gradient(circle at top right, rgba(79,70,229,0.10), transparent 28%),
+        var(--bg);
+    }
+
+    h1 {
+      font-size: 2.2rem;
+      margin-bottom: 8px;
+    }
+
+    h2, h3 {
+      margin-top: 0;
+    }
+
+    .card {
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      padding: 24px;
+      margin-bottom: 18px;
+      background: var(--card);
+      backdrop-filter: blur(10px);
+      box-shadow: var(--shadow);
+    }
+
+    .hidden {
+      display: none;
+    }
+
+    button {
+      padding: 11px 18px;
+      border-radius: 12px;
+      border: none;
+      cursor: pointer;
+      background: linear-gradient(135deg, var(--accent), var(--accent-2));
+      color: white;
+      font-weight: 600;
+      box-shadow: 0 10px 24px rgba(79,70,229,0.22);
+    }
+
+    button:hover {
+      transform: translateY(-1px);
+    }
+
+    input[type="number"],
+    input[type="text"] {
+      width: 100%;
+      max-width: 560px;
+      padding: 12px 14px;
+      margin-top: 12px;
+      border-radius: 12px;
+      border: 1px solid rgba(148,163,184,0.35);
+      background: rgba(255,255,255,0.92);
+      color: var(--text);
+      font-size: 1rem;
+    }
+
+    .small {
+      color: var(--muted);
+      font-size: 0.96rem;
+    }
+
+    .result,
+    .interp {
+      padding: 12px 0;
+      border-bottom: 1px solid rgba(226,232,240,0.8);
+    }
+
+    .result:last-child,
+    .interp:last-child {
+      border-bottom: none;
+    }
+
+    .error {
+      color: #b00020;
+      margin-top: 10px;
+    }
+
+    .chat-reply {
+      background: rgba(248,250,252,0.95);
+      padding: 16px;
+      border-radius: 14px;
+      margin-top: 12px;
+      white-space: pre-wrap;
+      border: 1px solid rgba(226,232,240,0.85);
+    }
+
+    .row {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    .row button {
+      margin-top: 12px;
+    }
+
+    .pill {
+      display: inline-block;
+      font-size: 0.84rem;
+      padding: 4px 10px;
+      border-radius: 999px;
+      color: var(--accent);
+      background: rgba(79,70,229,0.08);
+      margin-bottom: 10px;
+      font-weight: 600;
+    }
+
+    .distance-note {
+      font-size: 0.95rem;
+      color: var(--muted);
+      margin-top: 10px;
+    }
+  </style>
+</head>
+<body>
+  <h1>World Values Country Matcher</h1>
+  <p class="small">
+    Answer 15 survey questions and see which countries have the most similar average response patterns.
+  </p>
+
+  <div id="loading" class="card">Loading questions...</div>
+
+  <div id="quiz" class="card hidden">
+    <div class="pill">15-question values match</div>
+    <div id="progress" class="small"></div>
+    <h2 id="questionText"></h2>
+    <div id="theme" class="small"></div>
+    <div id="choices" class="small"></div>
+    <input id="answerInput" type="number" />
+    <div class="small">Enter the number that best matches your answer.</div>
+    <div class="error" id="errorBox"></div>
+    <div style="margin-top: 16px;">
+      <button id="nextBtn">Next</button>
+    </div>
+  </div>
+
+  <div id="results" class="card hidden">
+    <div class="pill">Your result</div>
+    <h2>Your closest country matches</h2>
+    <div id="matches"></div>
+    <div class="distance-note" id="distanceNote"></div>
+
+    <h3>Interpretation</h3>
+    <div id="interpretation"></div>
+
+    <h3>Claude explanation</h3>
+    <div id="claudeResult" class="chat-reply">Loading explanation...</div>
+
+    <h3>Ask about this result or the project</h3>
+    <div class="row">
+      <input
+        id="followupInput"
+        type="text"
+        placeholder="Why these 15 questions? Why did I match Singapore?"
+      />
+      <button id="askBtn">Ask Claude</button>
+    </div>
+    <div id="followupReply" class="chat-reply hidden"></div>
+    <div id="followupError" class="error"></div>
+
+    <div style="margin-top: 16px;">
+      <button id="restartBtn">Start over</button>
+    </div>
+  </div>
+
+  <script>
+    // Base URL for the deployed API.
+    // All frontend requests for questions, scoring, and chat go through this endpoint.
+    const API_BASE = 'https://world-values.fly.dev';
+
+    // App state lives in a few simple variables:
+    // - questions: the 15 selected survey questions from the API
+    // - currentIndex: which question the user is currently answering
+    // - answers: the user's responses keyed by question id
+    let questions = [];
+    let currentIndex = 0;
+    let answers = {};
+
+    // Cache the main DOM elements once so we can update the page efficiently.
+    const loadingEl = document.getElementById('loading');
+    const quizEl = document.getElementById('quiz');
+    const resultsEl = document.getElementById('results');
+    const progressEl = document.getElementById('progress');
+    const questionTextEl = document.getElementById('questionText');
+    const themeEl = document.getElementById('theme');
+    const choicesEl = document.getElementById('choices');
+    const answerInputEl = document.getElementById('answerInput');
+    const errorBoxEl = document.getElementById('errorBox');
+    const matchesEl = document.getElementById('matches');
+    const interpretationEl = document.getElementById('interpretation');
+    const claudeResultEl = document.getElementById('claudeResult');
+    const distanceNoteEl = document.getElementById('distanceNote');
+    const followupInputEl = document.getElementById('followupInput');
+    const followupReplyEl = document.getElementById('followupReply');
+    const followupErrorEl = document.getElementById('followupError');
+
+    // Fetch the selected questions from the API and then show the quiz.
+    // The API returns the exact 15 questions chosen during feature selection.
+    async function loadQuestions() {
+      const res = await fetch(`${API_BASE}/questions`);
+      if (!res.ok) throw new Error('Could not load questions');
+
+      questions = await res.json();
+      loadingEl.classList.add('hidden');
+      quizEl.classList.remove('hidden');
+      renderQuestion();
+    }
+
+    // Render the current question on screen.
+    // This updates the progress label, question text, theme, choices, and input value.
+    function renderQuestion() {
+      const q = questions[currentIndex];
+
+      progressEl.textContent = `Question ${currentIndex + 1} of ${questions.length}`;
+      questionTextEl.textContent = q.question_text;
+      themeEl.textContent = `Theme: ${q.theme.replaceAll('_', ' ')}`;
+
+      // A couple of yes/no neighbor questions read more naturally with slightly
+      // friendlier wording than the raw stored choice labels.
+      const nicerChoices = {
+        q22: '1 = Yes, I would mind; 2 = No, I would not mind',
+        q25: '1 = Yes, I would mind; 2 = No, I would not mind'
+      };
+
+      choicesEl.textContent = nicerChoices[q.question_id] || q.choices;
+      answerInputEl.value = answers[q.question_id] || '';
+      errorBoxEl.textContent = '';
+      answerInputEl.focus();
+    }
+
+    // Check whether the user's numeric answer is valid for the question's scale.
+    // Different questions use different response formats, so validation depends on type.
+    function validateAnswer(value, responseType) {
+      const n = Number(value);
+      if (!Number.isFinite(n)) return false;
+
+      if (responseType === 'ordinal_3') return n >= 1 && n <= 3;
+      if (responseType === 'ordinal_4') return n >= 1 && n <= 4;
+      if (responseType === 'ordinal_5') return n >= 1 && n <= 5;
+      if (responseType === 'ordinal_8') return n >= 1 && n <= 8;
+      if (responseType === 'scale_1_10') return n >= 1 && n <= 10;
+      if (responseType === 'binary_yes_no' || responseType === 'binary_mentioned') {
+        return n === 1 || n === 2;
+      }
+
+      return false;
+    }
+
+    // Send the completed answer set to the API scoring endpoint.
+    // The backend compares the user's answers to country-level average profiles
+    // and returns the closest matches plus a simple interpretation.
+    async function submitAnswers() {
+      const scoreRes = await fetch(`${API_BASE}/score`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ answers })
+      });
+
+      const scoreData = await scoreRes.json();
+      if (!scoreRes.ok) {
+        throw new Error(scoreData.error || 'Scoring failed');
+      }
+
+      quizEl.classList.add('hidden');
+      resultsEl.classList.remove('hidden');
+
+      matchesEl.innerHTML = '';
+      interpretationEl.innerHTML = '';
+      claudeResultEl.textContent = 'Loading explanation...';
+      followupReplyEl.classList.add('hidden');
+      followupErrorEl.textContent = '';
+
+      // Show the top matching countries returned by the API.
+      scoreData.top_matches.forEach((m, i) => {
+        const div = document.createElement('div');
+        div.className = 'result';
+        div.textContent = `${i + 1}. ${m.country_name} (distance: ${Number(m.distance).toFixed(2)})`;
+        matchesEl.appendChild(div);
+      });
+
+      // Keep only one interpretation item per theme so the explanation
+      // feels more varied and does not repeat closely related points.
+      const seenThemes = new Set();
+      const filteredInterpretation = (scoreData.interpretation || []).filter(item => {
+        if (seenThemes.has(item.theme)) return false;
+        seenThemes.add(item.theme);
+        return true;
+      });
+
+      filteredInterpretation.forEach(item => {
+        const div = document.createElement('div');
+        div.className = 'interp';
+
+        const direction = item.difference > 0 ? 'above' : 'below';
+
+        div.textContent =
+          `${item.theme.replaceAll('_', ' ')}: your answer (${Number(item.answer_value).toFixed(2)}) ` +
+          `is ${Math.abs(Number(item.difference)).toFixed(2)} points ${direction} ` +
+          `the global average (${Number(item.global_mean).toFixed(2)}).`;
+
+        interpretationEl.appendChild(div);
+      });
+
+      // Add a short explanation of what the distance values mean.
+      // This helps the user understand whether the top match is clearly stronger
+      // than the runner-up countries or whether the result is more clustered.
+      const topMatches = scoreData.top_matches || [];
+
+      if (topMatches.length >= 3) {
+        const d1 = Number(topMatches[0].distance);
+        const d2 = Number(topMatches[1].distance);
+        const d3 = Number(topMatches[2].distance);
+        const gap12 = d2 - d1;
+
+        let strengthText = '';
+
+        if (gap12 < 0.35) {
+          strengthText = 'Your top matches are fairly close together, so your answers fit a broader cluster rather than pointing strongly to just one country.';
+        } else if (gap12 < 0.8) {
+          strengthText = 'Your top match stands out somewhat, but there are still a couple of nearby alternatives.';
+        } else {
+          strengthText = 'Your top match stands out clearly from the next closest countries.';
+        }
+
+        distanceNoteEl.textContent =
+          `Distance measures how far your full set of answers is from each country's average answer pattern ` +
+          `across the 15 questions. Lower means closer. Your closest match scored ${d1.toFixed(2)}, ` +
+          `compared with ${d2.toFixed(2)} and ${d3.toFixed(2)} for the next two. ${strengthText}`;
+      }
+
+      // Ask the backend for a natural-language explanation of the result.
+      // The frontend never talks to Claude directly. Instead, the API sends
+      // structured result data to Claude and returns the writeup.
+      try {
+        const chatRes = await fetch(`${API_BASE}/chat`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            mode: 'result',
+            answers
+          })
+        });
+
+        const chatData = await chatRes.json();
+        if (!chatRes.ok) {
+          throw new Error(chatData.error || 'Claude explanation failed');
+        }
+
+        claudeResultEl.textContent = chatData.reply || 'No explanation returned.';
+      } catch (err) {
+        claudeResultEl.textContent = `Claude explanation unavailable: ${err.message}`;
+      }
+    }
+
+    // Let the user ask a follow-up question about either the project
+    // or their result. This sends the message to the backend chat endpoint.
+    async function askFollowup() {
+      const message = followupInputEl.value.trim();
+      if (!message) return;
+
+      followupErrorEl.textContent = '';
+      followupReplyEl.classList.remove('hidden');
+      followupReplyEl.textContent = 'Thinking...';
+
+      try {
+        const res = await fetch(`${API_BASE}/chat`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            mode: 'background',
+            message
+          })
+        });
+
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Chat request failed');
+
+        followupReplyEl.textContent = data.reply || 'No reply returned.';
+      } catch (err) {
+        followupReplyEl.classList.add('hidden');
+        followupErrorEl.textContent = err.message;
+      }
+    }
+
+    // Advance to the next question after validating the user's input.
+    // Once the final question is answered, submit the full quiz.
+    document.getElementById('nextBtn').addEventListener('click', async () => {
+      const q = questions[currentIndex];
+      const value = answerInputEl.value.trim();
+
+      if (!validateAnswer(value, q.response_type)) {
+        errorBoxEl.textContent = 'Please enter a valid number for this question.';
+        return;
+      }
+
+      answers[q.question_id] = Number(value);
+
+      if (currentIndex < questions.length - 1) {
+        currentIndex += 1;
+        renderQuestion();
+      } else {
+        try {
+          await submitAnswers();
+        } catch (err) {
+          errorBoxEl.textContent = err.message;
+        }
+      }
+    });
+
+    // Support both button click and Enter key for follow-up questions.
+    document.getElementById('askBtn').addEventListener('click', askFollowup);
+
+    followupInputEl.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') askFollowup();
+    });
+
+    // Reset the quiz state so the user can take the survey again.
+    document.getElementById('restartBtn').addEventListener('click', () => {
+      currentIndex = 0;
+      answers = {};
+      resultsEl.classList.add('hidden');
+      quizEl.classList.remove('hidden');
+      renderQuestion();
+    });
+
+    // Kick off the app by loading questions from the backend.
+    loadQuestions().catch(err => {
+      loadingEl.textContent = err.message;
+    });
+  </script>
+</body>
+</html>
